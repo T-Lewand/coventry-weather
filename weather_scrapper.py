@@ -1,3 +1,5 @@
+
+import requests
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium import webdriver
@@ -99,11 +101,31 @@ class WeatherScrapper:
 
         return data_df
 
+    def get_daylength(self):
+        """
+        Collects length of day in hours for all days in given month
+        :return: list of dict
+        """
+        url = f'https://www.timeanddate.com/sun/uk/london?month={self.month}&year={self.year}'
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        month_daylength = []
+        for day in range(1, self.days + 1):
+            day_data = soup.find('tr', {'data-day': f'{day}'})
+            daylength = day_data.find('td', {'class': 'c tr sep-l'}).text
+            daylength = daylength.split(':')
+            hour, minutes, seconds = float(daylength[0]), float(daylength[1]), float(daylength[2])
+            daylength = hour + minutes/60 + seconds/60/60
+            day = {'timestamp': datetime.strptime(f'{self.year}-{self.month}-{day}', '%Y-%m-%d'),
+                   'daylength': daylength}
+            month_daylength.append(day)
+
+        return month_daylength
+
 
 class DataGather:
     def __init__(self, start_year: int, start_month: int, end_year: int, end_month: int):
         """
-
         :param start_year: Year of start of data collection period
         :param start_month: Month of start of data collection period
         :param end_year: Year of end of data collection period
@@ -115,10 +137,11 @@ class DataGather:
         self.end_stamp = datetime.strptime(end_time_string, '%Y-%m-%d')
         self.dates = pd.date_range(self.start_stamp, self.end_stamp, freq='MS').to_list()
 
-    def collect(self, latency=0.5):
+    def collect_weather(self, latency=0.5, save=True):
         """
         Collects temperature data for given period
         :param latency: wait time in seconds
+        :param save: if True saves data to a csv file in working directory
         :return: DataFrame with temperature and timestamps
         """
         data = pd.DataFrame()
@@ -131,5 +154,77 @@ class DataGather:
             data = data.append(month_data)
         data.reset_index(inplace=True)
         data.drop('index', inplace=True, axis=1)
+        if save:
+            data.to_csv('London_weather.txt')
 
         return data
+
+    def collect_daylight(self, save=True):
+        """
+        Collects lenght of day for days in given period
+        :param save: if True saves data to a csv file in working directory
+        :return: DataFrame with length of day and timestamps
+        """
+        data = pd.DataFrame()
+        for i in self.dates:
+            year = i.year
+            month = i.month
+            print(f'Collecting for {year}-{month:02d}')
+            scrapper = WeatherScrapper(year, month)
+            month_data = scrapper.get_daylength()
+            data = data.append(month_data)
+        data.reset_index(inplace=True)
+        data.drop('index', inplace=True, axis=1)
+        if save:
+            data.to_csv('London_daylight.txt')
+        return data
+
+class WeatherProcessor:
+    def __init__(self, filename=None):
+        if filename is None:
+            self.data = pd.read_csv('London_weather.txt', parse_dates=['timestamp'], index_col=0)
+
+        else:
+            self.file = filename
+            self.data = pd.read_csv(self.file, parse_dates=['timestamp'], index_col=0)
+
+    def daily(self):
+        """
+        Creates daily weather data from hourly
+        :return: DataFrame
+        """
+        data = self.data.copy()
+        daily = pd.DataFrame()
+        for i in range(data.shape[0]):
+            data.loc[i, 'timestamp'] = data.loc[i, 'timestamp'].date()
+
+        grouped = data.groupby(by='timestamp')
+
+        for i in grouped:
+
+            index = i[1].index[0]
+            day = i[1].loc[index, 'timestamp']
+            temp = i[1]['temperature'].mean()
+            description = i[1]['description'].mode()
+
+            day_entry = [{'timestamp':day, 'temperature': temp, 'description': description[0]}]
+            day_data = pd.DataFrame(day_entry)
+            daily = daily.append(day_data)
+
+        daily.reset_index(inplace=True)
+        daily.drop('index', inplace=True, axis=1)
+        daily['temperature'] = daily['temperature'].round(decimals=1)
+
+        return daily
+
+    def add_daylight(self, daily_data, filename=None):
+        if filename is None:
+            daylight = pd.read_csv('London_daylight.txt', parse_dates=['timestamp'], index_col=0)
+        else:
+            daylight = pd.read_csv(filename, parse_dates=['timestamp'], index_col=0)
+
+        data = pd.concat([daily_data, daylight], axis=1)
+        data = data.iloc[:, [0, 1, 2, -1]]
+
+        return data
+
